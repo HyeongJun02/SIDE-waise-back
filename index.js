@@ -1,37 +1,38 @@
 /* server/index.js */
-const express = require('express');
-const cors = require('cors');
-const { z } = require('zod');
-const { nanoid } = require('nanoid');
-const { formatISO, startOfDay } = require('date-fns');
-require('dotenv').config();
+import express from 'express';
+import cors from 'cors';
+import { z } from 'zod';
+import { nanoid } from 'nanoid';
+import { formatISO, startOfDay } from 'date-fns';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8000;
 app.use(cors());
 app.use(express.json());
 
-// ── In‑Memory 저장소 (DB 전까지)
+// ── In-Memory 저장소 (DB 전까지)
 const quotes = {
-  // id: quote
   '2025-09-08': {
     id: '2025-09-08',
-    template: '(A)를 예측하는 최선의 방법은 (B)를 창조하는 것이다.',
+    template: '(A)를 예측하는 최선의 방법은\n(B)를 창조하는 것이다.',
     author: '앨런 케이',
     answerA: '미래',
     answerB: '미래',
   },
 };
-const submissions = new Map(); // key: submissionId → { id, quoteId, deviceId, fillA, fillB, likes:Set }
+const submissions = new Map(); // submissionId -> { id, quoteId, deviceId, fillA, fillB, likes:Set }
 
 // ── 미들웨어: 기기 식별 (익명)
-app.use((req, res, next) => {
+app.use((req, _res, next) => {
   const did = req.header('X-Device-Id');
   req.deviceId = did || null;
   next();
 });
 
-// ── 유틸: 하루 키(quoteId+deviceId)
+// ── 유틸: 하루 키(quoteId+deviceId+YYYY-MM-DD)
 const dayKey = (quoteId, deviceId) => {
   const day = formatISO(startOfDay(new Date()), { representation: 'date' });
   return `${quoteId}:${deviceId}:${day}`;
@@ -39,11 +40,11 @@ const dayKey = (quoteId, deviceId) => {
 const dayLocks = new Set(); // 오늘 제출/건너뛰기 잠금 키 집합
 
 // 헬스체크
-app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // 오늘의 명언
 app.get('/quotes/today', (req, res) => {
-  const q = quotes['2025-09-08']; // 추후 날짜/로테이션 로직
+  const q = quotes['2025-09-08']; // TODO: 날짜/로테 로직
   const locked = req.deviceId
     ? dayLocks.has(dayKey(q.id, req.deviceId))
     : false;
@@ -62,23 +63,25 @@ app.post('/quotes/:id/submissions', (req, res) => {
     return res.status(400).json({ message: 'X-Device-Id header required' });
   const { id } = req.params;
   if (!quotes[id]) return res.status(404).json({ message: 'Quote not found' });
-  if (dayLocks.has(dayKey(id, req.deviceId)))
+  if (dayLocks.has(dayKey(id, req.deviceId))) {
     return res
       .status(409)
       .json({ message: 'Already submitted or skipped today' });
+  }
 
-  const parse = SubmitBody.safeParse(req.body);
-  if (!parse.success)
+  const parsed = SubmitBody.safeParse(req.body);
+  if (!parsed.success) {
     return res
       .status(400)
-      .json({ message: 'Invalid body', issues: parse.error.issues });
+      .json({ message: 'Invalid body', issues: parsed.error.issues });
+  }
 
   const newId = nanoid(12);
   submissions.set(newId, {
     id: newId,
     quoteId: id,
     deviceId: req.deviceId,
-    ...parse.data,
+    ...parsed.data,
     likes: new Set(),
   });
   dayLocks.add(dayKey(id, req.deviceId));
@@ -100,14 +103,14 @@ app.get('/quotes/:id/ranking', (req, res) => {
   const { id } = req.params;
   const list = [...submissions.values()].filter((s) => s.quoteId === id);
   list.sort((a, b) => b.likes.size - a.likes.size || (a.id < b.id ? 1 : -1));
-  const payload = list.map((s) => ({
+  const items = list.map((s) => ({
     id: s.id,
     quoteId: s.quoteId,
     fillA: s.fillA,
     fillB: s.fillB,
     likes: s.likes.size,
   }));
-  res.json({ items: payload });
+  res.json({ items });
 });
 
 // 좋아요 토글
@@ -122,14 +125,15 @@ app.post('/submissions/:sid/like', (req, res) => {
 });
 
 // 에러 핸들링
-app.use((err, req, res, next) => {
+// eslint-disable-next-line no-unused-vars
+app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(500).json({ message: 'Internal error' });
 });
 
 app.listen(PORT, () => console.log(`Waise API on :${PORT}`));
 
-// ── Flutter 연동 메모
-// - 앱 최초 실행 시 UUID 생성 후 SharedPreferences 에 저장 → 모든 요청 헤더에 X-Device-Id 전송.
-// - todayQuote 응답의 locked=true 면 클라이언트에서 버튼 비활성화.
-// - 서버에도 dayLocks 로 이중 잠금(신뢰 경계 상 서버가 최종 권한).
+// Flutter 연동 메모
+// - 앱 최초 실행: UUID 생성 후 SharedPreferences 보관 → 모든 요청에 X-Device-Id 헤더 첨부.
+// - /quotes/today 의 locked=true면 제출/건너뛰기 비활성화.
+// - 서버 dayLocks로 이중 잠금(서버 최종 권한).
